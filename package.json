@@ -1,0 +1,34 @@
+{
+  "name": "astro-pathfinder",
+  "version": "0.1.0",
+  "description": "Dev-only component inspector for Astro — hover any element and see which .astro files produced it, innermost first.",
+  "type": "module",
+  "private": true,
+  "license": "UNLICENSED",
+  "exports": {
+    ".": "./pathfinder.mjs"
+  },
+  "main": "./pathfinder.mjs",
+  "files": [
+    "pathfinder.mjs",
+    "pathfinder-client.js",
+    "README.md"
+  ],
+  "keywords": [
+    "astro",
+    "astro-integration",
+    "withastro",
+    "devtools",
+    "dev-overlay"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/furioursus/astro-pathfinder.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "astro": ">=7"
+  }
+}
