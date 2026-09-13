@@ -79,6 +79,7 @@ li .dir { color: #6b7280; }
 li .file { color: #cfd6e4; }
 li:first-child .file { color: #7fd6b4; font-weight: 600; }
 li .line { color: #5d6472; }
+li .note { color: #c9a227; }
 .empty { padding: 7px 9px; color: #6b7280; }
 .box {
 	position: fixed; z-index: 2147483645; pointer-events: none;
@@ -176,43 +177,83 @@ function stampFor(el) {
 	return el.getAttribute?.(MARKS.stamp) ?? null;
 }
 
-/** An entry is "path:line"; the path is everything before the last colon. */
-const filePart = (entry) => entry.slice(0, entry.lastIndexOf(':'));
+/**
+ * Markers carry "path:line"; rows are {path, line, note}. Island rows have no
+ * line at all, which is why rows stopped being strings -- splitting on the last
+ * colon quietly mangles a path that has no line appended to it.
+ */
+function entry(marker) {
+	const cut = marker.lastIndexOf(':');
+	return { path: marker.slice(0, cut), line: marker.slice(cut + 1), note: null };
+}
 
-/** The displayed list: stamp first, then the render chain, innermost out. */
+/**
+ * The framework component that rendered `el`, if it sits inside a hydrated
+ * island -- Astro puts the source path on <astro-island component-url>.
+ *
+ * Only reached when `el` carries no stamp of its own. A stamped element inside
+ * an island is .astro markup passed into the island's slot: authored in a real
+ * file, which the stamp already names correctly.
+ *
+ * Dev serves these as clean root-relative paths ("/src/components/NavBar.vue").
+ * A component outside the project root arrives as "/@fs/<abs path>", which is
+ * still openable, so it is unwrapped rather than dropped. HMR can append a
+ * query; the editor wants the bare path.
+ */
+function islandFor(el) {
+	const island = el.closest?.('astro-island');
+	const url = island?.getAttribute('component-url');
+	if (!url) return null;
+
+	let path = url.split('?')[0];
+	if (path.startsWith('/@fs/')) path = path.slice('/@fs'.length);
+	else if (path.startsWith('/')) path = path.slice(1);
+	if (!path) return null;
+
+	// Named exports matter here: one .tsx can export several components, and
+	// "default" is noise on every other row.
+	const exported = island.getAttribute('component-export');
+	return { path, line: null, note: exported && exported !== 'default' ? exported : null };
+}
+
+/** The displayed list: innermost first, out to the page route. */
 function rowsFor(el) {
 	const rows = [];
+
 	const stamp = stampFor(el);
-	if (stamp) rows.push(stamp);
+	if (stamp) rows.push(entry(stamp));
+	else {
+		const island = islandFor(el);
+		if (island) rows.push(island);
+	}
 
 	const chain = chainFor(el);
 	if (chain) {
 		for (let i = chain.length - 1; i >= 0; i--) {
+			const next = entry(chain[i]);
 			// Collapse a repeat of the file directly above it. Usually that is
 			// the stamp and the innermost component naming the same file, where
 			// the stamp's row is the one worth keeping -- it has the real line.
-			if (rows.length && filePart(rows[rows.length - 1]) === filePart(chain[i])) continue;
-			rows.push(chain[i]);
+			if (rows.length && rows[rows.length - 1].path === next.path) continue;
+			rows.push(next);
 		}
 	}
 	return rows;
 }
 
-function row(entry) {
-	// entry is "src/components/Button.astro:34"
-	const cut = entry.lastIndexOf(':');
-	const path = entry.slice(0, cut);
-	const line = entry.slice(cut + 1);
+function row({ path, line, note }) {
 	const slash = path.lastIndexOf('/');
+	const target = line ? `${path}:${line}` : path;
 
 	const li = document.createElement('li');
 	li.innerHTML =
 		`<span class="dir">${path.slice(0, slash + 1)}</span>` +
 		`<span class="file">${path.slice(slash + 1)}</span>` +
-		`<span class="line">:${line}</span>`;
+		(line ? `<span class="line">:${line}</span>` : '') +
+		(note ? `<span class="note"> ${note}</span>` : '');
 	// Vite's own dev middleware -- same endpoint its error overlay uses.
 	li.addEventListener('click', () => {
-		fetch(`/__open-in-editor?file=${encodeURIComponent(entry)}`);
+		fetch(`/__open-in-editor?file=${encodeURIComponent(target)}`);
 	});
 	return li;
 }

@@ -109,6 +109,7 @@ If your `dev` script has a `predev` hook (data fetch, codegen), give
 | **Hover** | Updates the chain and outlines the element |
 | **Click a row** | Opens that file at that line, via Vite's own `/__open-in-editor` |
 | **Pointer onto the panel** | Freezes the chain, so walking over to click can't change it |
+| **Inside a framework island** | Top row names the `.vue`/`.jsx`/`.svelte` component |
 | **`ctrl+alt+i`** | Real on/off — panel, outline and hover tracking all stop. Persists in `localStorage` |
 
 `ctrl+alt+i` rather than anything with `cmd`, because Chrome on macOS already
@@ -130,9 +131,17 @@ owns `cmd+alt+i` and `cmd+shift+i` for DevTools.
 - **`<script>`, `<style>` and `<slot>` are never stamped.** Astro reads those
   tags' attributes or substitutes the element away entirely; an extra attribute
   there is a behaviour risk for no benefit.
-- **Markup inside a framework island is not `.astro`, so it has no stamp.** Hover
-  inside a Vue/React/Svelte island and the chain starts at the `.astro` file that
-  mounted it. Correct as far as it goes — pathfinder can't name a `.vue` file.
+- **Markup inside a hydrated framework island names the framework component.**
+  Hover a button Vue rendered and the top row is `src/components/NavBar.vue`,
+  read off the island's own `component-url`. No line number — the element was
+  never written as markup in a file pathfinder parses — but the row still opens
+  the file. A named export is shown beside the path.
+- **A framework component with no `client:*` directive can't be named.** Astro
+  only emits `<astro-island>` for hydrated components; a statically-rendered one
+  leaves no trace in the HTML, so the chain starts at the `.astro` file that
+  rendered it.
+- **`.astro` markup passed into an island's slot names its own file, not the
+  island.** It carries a stamp, and an element's own stamp always wins.
 
 ## How it works
 
@@ -164,7 +173,10 @@ special case — they never arise. This is what Astro's own Go compiler did.
 
 The client uses the stamp for the top row (exact file, exact line) and the
 comment chain for the rest, dropping the chain's innermost entry when it names
-the file the stamp already did.
+the file the stamp already did. An element with no stamp that sits inside a
+hydrated island gets a **third** source for the top row: Astro puts the
+component's path on `<astro-island component-url>`, so a Vue/React/Svelte
+component can be named even though pathfinder never parsed it.
 
 Stamps come from `@astrojs/compiler-rs`'s own `parse()`, which returns an
 oxc/ESTree AST with offsets on every node — **offsets whose convention is not
@@ -228,7 +240,7 @@ against four **real** projects of different shapes rather than a scaffolded toy:
 | Project shape | Astro | compiler-rs | Result |
 | :--- | :--- | :--- | :--- |
 | 140 components, 18,374 pages, static | 7.3.2 | 0.4.0 | full — 566 stamps, chains 4–5 deep |
-| 161 components + 69 Vue islands | 7.2.1 | 0.3.2 | full — found the byte-offset bug |
+| 161 components + 69 Vue islands | 7.2.1 | 0.3.2 | full — islands named, found the byte-offset bug |
 | SSR, `output: 'server'` + adapter | 7.2.9 | 0.4.0 | full — 0 mangled markers |
 | Cloudflare adapter, small | 6.4.2 | absent | correctly disables itself |
 
