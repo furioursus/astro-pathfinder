@@ -64,21 +64,6 @@ it can't be resolved, pathfinder logs why and runs comments-only.
 Two supported shapes. Both work; pick by whether the project can reach this repo
 at install time.
 
-### Vendored (recommended for private or CI-built projects)
-
-Copy `pathfinder.mjs` and `pathfinder-client.js` anywhere in the project — they
-have no dependencies beyond `node:` builtins and no opinion about where they
-live.
-
-```js
-// astro.config.mjs
-import pathfinder from './integrations/pathfinder.mjs';
-
-export default defineConfig({
-  integrations: [pathfinder()],
-});
-```
-
 ### As a dependency
 
 ```bash
@@ -89,9 +74,25 @@ npm i -D github:furioursus/astro-pathfinder
 import pathfinder from 'astro-pathfinder';
 ```
 
-**If this repo is private, vendor instead.** A private git dependency means
-every CI build needs credentials to reach GitHub, and the first `npm ci` without
-them fails the build — a steep price for a dev-only overlay.
+### Vendored
+
+Copy `pathfinder.mjs` and `pathfinder-client.js` anywhere in the project — they
+have no dependencies beyond `node:` builtins and no opinion about where they
+live, because paths resolve against Astro's `config.root` rather than their own
+location.
+
+```js
+// astro.config.mjs
+import pathfinder from './integrations/pathfinder.mjs';
+
+export default defineConfig({
+  integrations: [pathfinder()],
+});
+```
+
+Worth doing if you'd rather your CI not reach GitHub at install time for a
+dev-only overlay, or if you want to read the thing you're running — it's two
+files and they're meant to be read.
 
 ### Then add a script
 
@@ -254,3 +255,7 @@ chunks differing.
 
 The `peerDependencies` range says `>=7` because that is what has actually been
 run, and because Astro 6 and earlier genuinely don't need this.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

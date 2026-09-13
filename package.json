@@ -1,10 +1,10 @@
 {
   "name": "astro-pathfinder",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "description": "Dev-only component inspector for Astro — hover any element and see which .astro files produced it, innermost first.",
   "type": "module",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "exports": {
     ".": "./pathfinder.mjs"
   },
@@ -12,7 +12,8 @@
   "files": [
     "pathfinder.mjs",
     "pathfinder-client.js",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "keywords": [
     "astro",
