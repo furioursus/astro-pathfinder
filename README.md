@@ -3,7 +3,8 @@
 **Hover anything on your Astro dev server and find out which `.astro` file made it.**
 
 > **TL;DR** — `INSPECT=1 astro dev`, then hover. A panel in the bottom-left names
-> the components that produced whatever is under your cursor, innermost first.
+> the components that produced whatever is under your cursor, innermost first,
+> with the top row exact to the line.
 > Click a row to open that file in your editor. `ctrl+alt+i` toggles it. It is a
 > hard no-op in every build — not stripped, never constructed.
 
@@ -96,28 +97,62 @@ If your `dev` script has a `predev` hook (data fetch, codegen), give
 `ctrl+alt+i` rather than anything with `cmd`, because Chrome on macOS already
 owns `cmd+alt+i` and `cmd+shift+i` for DevTools.
 
-## Two things to know before trusting a row
+## What it can and can't see
 
-- **Slotted inline markup is attributed one level off.** Plain markup written in
-  a parent and passed into a component's slot lands inside that component's
-  range, so the top row names the component. The parent is the row directly
-  below — shallow-wrong, never absent. Components passed as slots are correct.
+- **Slotted markup is attributed correctly.** Markup written inline in a parent
+  and passed into a component's slot names the file it was *typed* in, not the
+  component it renders inside. This was wrong before v0.2.0.
+- **`set:html` content has no line of its own.** An element injected as a raw
+  HTML string — `<Fragment set:html={svg} />` — was never written as markup
+  anywhere, so it carries no stamp. The top row falls back to the component that
+  emitted it, which is the right answer; you just don't get a line number.
 - **Astro's built-ins (`<Image>`, `<Picture>`) are deliberately unlisted.**
   They're real `.astro` files, but not ones you'd edit. Their markup is
   attributed to whichever of your components called them, which is the answer
   you actually wanted.
+- **`<script>`, `<style>` and `<slot>` are never stamped.** Astro reads those
+  tags' attributes or substitutes the element away entirely; an extra attribute
+  there is a behaviour risk for no benefit.
 
 ## How it works
 
-A Vite `load` hook reads each `.astro` file and wraps its template in HTML
-comments:
+Two layers, answering two different questions.
+
+**Component boundaries**, as HTML comments wrapping each template, written by a
+Vite `load` hook:
 
 ```
 ---<!--src:src/components/Button.astro:34-->  …template…  <!--/src-->
 ```
 
-The client half walks those comments and hands every element the stack of files
-open at its start tag.
+Walked in the browser, these give the **render chain** — which component emitted
+this region of output. They see components that emit no elements of their own,
+which the second layer can't.
+
+**Per-element stamps**, an attribute on each element's opening tag carrying the
+file and line where that tag is written:
+
+```html
+<button data-pf="src/pages/index.astro:47" class="b">
+```
+
+These give **lexical authorship**, and they're why slots work. Markup passed into
+a component's slot is *rendered* inside the callee, so the comment stack alone
+attributes it to the component rather than the file it was typed in. A stamp is
+applied at parse time in the file that contains the tag, so slots stop being a
+special case — they never arise. This is what Astro's own Go compiler did.
+
+The client uses the stamp for the top row (exact file, exact line) and the
+comment chain for the rest, dropping the chain's innermost entry when it names
+the file the stamp already did.
+
+Stamps come from `@astrojs/compiler-rs`'s own `parse()`, which returns an
+oxc/ESTree AST with byte offsets on every node. Every insertion — both comments
+and every stamp — is collected as an offset and applied back-to-front in one
+pass, so earlier offsets stay valid. The stamp goes immediately after the tag
+*name*, which is safe for self-closing tags and expression attributes alike. The
+parser ships with Astro but is resolved at runtime rather than depended on; if it
+can't be reached, pathfinder logs a warning and falls back to comments only.
 
 Three decisions hold the whole thing up. All three fail *silently* if you change
 them, which is why they're spelled out here and in the source:
@@ -159,10 +194,17 @@ grep -rc '<!--src:' dist/ | grep -v ':0$'   # expect no output
 ## Verified on
 
 Astro 7.3.2, Node 22, macOS. Measured against a 140-component, 18,374-page site:
-markers balanced in the live DOM, `document.compatMode` still `CSS1Compat`,
-chains correct four levels deep including layout nesting order, and a build
-producing zero markers and zero injected script. Exercised in both the vendored
-and the `node_modules/` shape.
+
+- all **140/140** files parse clean, **0** diagnostics, **1,216** stamps injected,
+  **0** line-count changes, **0.77ms/file**
+- markers balanced in the live DOM, `document.compatMode` still `CSS1Compat`
+- chains correct four and five levels deep, including layout nesting order
+- slot-written markup naming its own file and line; `set:html` content correctly
+  falling back to the emitting component
+- **all 373 HTML files of a sample build byte-identical** between
+  `INSPECT=1 astro build` and a clean build — only `.ics` `DTSTAMP` and
+  Pagefind's nondeterministic chunks differ
+- exercised in both the vendored and the `node_modules/` shape
 
 The `peerDependencies` range says `>=7` because that is what has actually been
 run. Earlier majors used the Go compiler, which shipped `annotateSourceFile`

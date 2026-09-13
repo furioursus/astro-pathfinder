@@ -5,8 +5,10 @@
  * INSPECT=1. Never reaches a build: the integration's config:setup hook
  * returns before injectScript() unless both of those hold.
  *
- * What it reads: the HTML comments the inspector's Vite `load` hook wraps
- * around every .astro component's template --
+ * It reads the two layers pathfinder.mjs writes, and answers with one
+ * list built from both.
+ *
+ * COMMENTS give the render chain -- which component emitted this region:
  *
  *     <!--src:src/components/Button.astro:34-->  ...markup...  <!--/src-->
  *
@@ -17,11 +19,23 @@
  * marker sits after </html> in source and gets moved inside), and order
  * survives that where containment does not.
  *
+ * STAMPS give lexical authorship -- the file the tag was actually typed
+ * in, which for slotted markup is NOT the component it renders inside:
+ *
+ *     <button data-pf="src/pages/index.astro:47" class="b">
+ *
+ * So the top row comes from the nearest stamp (exact file, exact line)
+ * and the rest from the comment chain, with the chain's innermost entry
+ * dropped when it names the same file the stamp already did. An element
+ * with no stamp -- injected at runtime, or emitted by set:html -- falls
+ * back to the comment chain alone, which is what this did before stamps
+ * existed.
+ *
  * The marker strings come from globalThis.__PATHFINDER_MARKS__, which the
  * integration writes as a prelude to this file -- one source of truth for
  * both halves, so the two can never drift apart.
  */
-const MARKS = globalThis.__PATHFINDER_MARKS__ ?? { open: 'src:', close: '/src' };
+const MARKS = globalThis.__PATHFINDER_MARKS__ ?? { open: 'src:', close: '/src', stamp: 'data-pf' };
 
 /** Element -> [outermost, ..., innermost] component paths. Rebuilt by scan(). */
 let owners = new WeakMap();
@@ -146,6 +160,44 @@ function chainFor(el) {
 	return null;
 }
 
+/**
+ * The element's OWN stamp -- "file:line" of the tag as written -- or null.
+ *
+ * Deliberately not a walk up the ancestors. An element with no stamp was
+ * not authored as markup in any .astro template: it came from set:html,
+ * from a runtime insertion, or it is one of the tags pathfinder.mjs skips.
+ * The nearest stamped ancestor in those cases is in whatever file happens
+ * to wrap the component, which is a confident wrong answer -- an <svg>
+ * emitted by Icon.astro's `<Fragment set:html>` would be attributed to the
+ * card that rendered the icon. When there is no stamp the comment chain is
+ * the authoritative answer, so return null and let it speak.
+ */
+function stampFor(el) {
+	return el.getAttribute?.(MARKS.stamp) ?? null;
+}
+
+/** An entry is "path:line"; the path is everything before the last colon. */
+const filePart = (entry) => entry.slice(0, entry.lastIndexOf(':'));
+
+/** The displayed list: stamp first, then the render chain, innermost out. */
+function rowsFor(el) {
+	const rows = [];
+	const stamp = stampFor(el);
+	if (stamp) rows.push(stamp);
+
+	const chain = chainFor(el);
+	if (chain) {
+		for (let i = chain.length - 1; i >= 0; i--) {
+			// Collapse a repeat of the file directly above it. Usually that is
+			// the stamp and the innermost component naming the same file, where
+			// the stamp's row is the one worth keeping -- it has the real line.
+			if (rows.length && filePart(rows[rows.length - 1]) === filePart(chain[i])) continue;
+			rows.push(chain[i]);
+		}
+	}
+	return rows;
+}
+
 function row(entry) {
 	// entry is "src/components/Button.astro:34"
 	const cut = entry.lastIndexOf(':');
@@ -165,16 +217,15 @@ function row(entry) {
 	return li;
 }
 
-function render(chain, el) {
+function render(rows, el) {
 	list.replaceChildren();
-	if (!chain || !chain.length) {
+	if (!rows.length) {
 		empty.classList.remove('hidden');
 		box.classList.add('hidden');
 		return;
 	}
 	empty.classList.add('hidden');
-	// Innermost first: the file you almost always want is the top row.
-	for (let i = chain.length - 1; i >= 0; i--) list.append(row(chain[i]));
+	for (const entry of rows) list.append(row(entry));
 
 	const r = el.getBoundingClientRect();
 	if (r.width || r.height) {
@@ -191,14 +242,15 @@ function onOver(e) {
 	const el = e.target;
 	if (!(el instanceof Element) || el === host || host.contains(el)) return;
 
-	let chain = chainFor(el);
-	// A miss usually means markup arrived after the last pass. Rescan at
-	// most once a second so a genuinely unowned element cannot spin.
-	if (!chain && performance.now() - lastScan > 1000) {
+	let rows = rowsFor(el);
+	// A miss usually means markup arrived after the last comment pass.
+	// Rescan at most once a second so a genuinely unowned element cannot
+	// spin. (Stamps are attributes, so they never go stale this way.)
+	if (!rows.length && performance.now() - lastScan > 1000) {
 		scan();
-		chain = chainFor(el);
+		rows = rowsFor(el);
 	}
-	render(chain, el);
+	render(rows, el);
 }
 
 function toggle(on) {

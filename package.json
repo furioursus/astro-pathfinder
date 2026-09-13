@@ -1,6 +1,6 @@
 {
   "name": "astro-pathfinder",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Dev-only component inspector for Astro — hover any element and see which .astro files produced it, innermost first.",
   "type": "module",
   "private": true,
