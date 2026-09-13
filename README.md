@@ -42,6 +42,23 @@ Empty output means the annotation is still gone and this package is still the
 answer. Hits mean the built-in path may be viable again — confirm by curling a
 dev page and grepping for `data-astro-source-file`.
 
+## Compatibility
+
+**Astro 7 or newer.** On Astro 6 and earlier pathfinder disables itself with a
+message, because those versions don't need it and it would break them:
+
+- They compile through `@astrojs/compiler` (Go), where `annotateSourceFile` is
+  really implemented — Astro already stamps `data-astro-source-file` on every
+  element in dev and the toolbar reads it. Measured on Astro 6.4.2: 89
+  annotations on one page, no help required.
+- Their frontmatter parser eats the character immediately after the closing
+  `---`, which is exactly where the opening comment goes — turning `<!--src:…`
+  into visible `!--src:…` text on the page. 19 of 20 markers mangled before the
+  guard existed.
+
+The stamp layer also needs `@astrojs/compiler-rs`, which ships with Astro 7+. If
+it can't be resolved, pathfinder logs why and runs comments-only.
+
 ## Install
 
 Two supported shapes. Both work; pick by whether the project can reach this repo
@@ -113,6 +130,9 @@ owns `cmd+alt+i` and `cmd+shift+i` for DevTools.
 - **`<script>`, `<style>` and `<slot>` are never stamped.** Astro reads those
   tags' attributes or substitutes the element away entirely; an extra attribute
   there is a behaviour risk for no benefit.
+- **Markup inside a framework island is not `.astro`, so it has no stamp.** Hover
+  inside a Vue/React/Svelte island and the chain starts at the `.astro` file that
+  mounted it. Correct as far as it goes — pathfinder can't name a `.vue` file.
 
 ## How it works
 
@@ -147,7 +167,16 @@ comment chain for the rest, dropping the chain's innermost entry when it names
 the file the stamp already did.
 
 Stamps come from `@astrojs/compiler-rs`'s own `parse()`, which returns an
-oxc/ESTree AST with byte offsets on every node. Every insertion — both comments
+oxc/ESTree AST with offsets on every node — **offsets whose convention is not
+stable across compiler versions.** compiler-rs 0.3.x reports UTF-8 *byte*
+offsets; 0.4.x reports JS string indices. The two agree on a pure-ASCII file and
+diverge silently from the first non-ASCII character onward: one `≥` fifty lines
+up was enough to shift every stamp in a real file by two, landing them
+mid-attribute and producing markup that wouldn't compile. So no offset is used
+before it's checked against the source — both interpretations are tried, the one
+that lands on `<tagname` wins, and a tag whose offsets match neither is simply
+left unstamped. A future compiler inventing a third convention degrades to
+comments-only instead of corrupting files. Every insertion — both comments
 and every stamp — is collected as an offset and applied back-to-front in one
 pass, so earlier offsets stay valid. The stamp goes immediately after the tag
 *name*, which is safe for self-closing tags and expression attributes alike. The
@@ -193,19 +222,23 @@ grep -rc '<!--src:' dist/ | grep -v ':0$'   # expect no output
 
 ## Verified on
 
-Astro 7.3.2, Node 22, macOS. Measured against a 140-component, 18,374-page site:
+Astro 7.3.2 / Node 22 / macOS as the primary target, then deliberately tried
+against four **real** projects of different shapes rather than a scaffolded toy:
 
-- all **140/140** files parse clean, **0** diagnostics, **1,216** stamps injected,
-  **0** line-count changes, **0.77ms/file**
-- markers balanced in the live DOM, `document.compatMode` still `CSS1Compat`
-- chains correct four and five levels deep, including layout nesting order
-- slot-written markup naming its own file and line; `set:html` content correctly
-  falling back to the emitting component
-- **all 373 HTML files of a sample build byte-identical** between
-  `INSPECT=1 astro build` and a clean build — only `.ics` `DTSTAMP` and
-  Pagefind's nondeterministic chunks differ
-- exercised in both the vendored and the `node_modules/` shape
+| Project shape | Astro | compiler-rs | Result |
+| :--- | :--- | :--- | :--- |
+| 140 components, 18,374 pages, static | 7.3.2 | 0.4.0 | full — 566 stamps, chains 4–5 deep |
+| 161 components + 69 Vue islands | 7.2.1 | 0.3.2 | full — found the byte-offset bug |
+| SSR, `output: 'server'` + adapter | 7.2.9 | 0.4.0 | full — 0 mangled markers |
+| Cloudflare adapter, small | 6.4.2 | absent | correctly disables itself |
+
+On the primary project: all 140 files parse clean, 1,216 stamps, 0 line-count
+changes, 0.77ms/file; markers balanced in the live DOM; `document.compatMode`
+still `CSS1Compat`; slot-written markup naming its own file and line;
+`set:html` content correctly falling back to the emitting component; and **all
+373 HTML files of a sample build byte-identical** between `INSPECT=1 astro build`
+and a clean build, with only `.ics` `DTSTAMP` and Pagefind's nondeterministic
+chunks differing.
 
 The `peerDependencies` range says `>=7` because that is what has actually been
-run. Earlier majors used the Go compiler, which shipped `annotateSourceFile`
-natively — on those, you may not need this at all.
+run, and because Astro 6 and earlier genuinely don't need this.

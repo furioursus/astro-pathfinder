@@ -56,16 +56,19 @@
  * first, and Astro's transform then compiles the source we handed back.
  *
  * HOW LAYER 2 IS APPLIED: @astrojs/compiler-rs's own `parse()`, which
- * returns an oxc/ESTree-shaped AST with byte offsets on every node. Every
+ * returns an oxc/ESTree-shaped AST with offsets on every node -- offsets
+ * whose CONVENTION changes between compiler versions, so every one of them
+ * is checked against the source before it is used (see tagNameEnd). Every
  * insertion -- both comments and every stamp -- is collected as an offset
  * and applied back-to-front in one pass, so earlier offsets stay valid and
  * no bookkeeping is needed. The stamp goes immediately after the tag NAME,
  * which is safe for self-closing tags and expression attributes alike.
  *
- * The parser ships with Astro, but it is resolved at runtime rather than
- * declared as a dependency, and pathfinder degrades to comments-only with
- * a warning if it cannot be reached (pnpm's strict store, an unusual
- * layout). Layer 1 keeps working; only slot precision is lost.
+ * The parser ships with Astro, but it is resolved at module load rather
+ * than declared as a dependency, and pathfinder degrades to comments-only
+ * with a warning if it cannot be reached. Layer 1 keeps working; only slot
+ * precision is lost. See the resolution block below for why the timing of
+ * that import is load-bearing.
  *
  * NOTHING SHIFTS A LINE NUMBER. The opening comment goes at the END of the
  * closing `---` line rather than on a line of its own, and stamps are
@@ -88,8 +91,31 @@
  *     safe to put it. Stamps are unaffected and still applied.
  */
 import { readFileSync } from 'node:fs';
-import { relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+/**
+ * The parser ships with Astro but is resolved rather than depended on, so a
+ * project that cannot reach it degrades to comments-only instead of failing.
+ *
+ * Resolved HERE, at module load, and deliberately not inside the hook. Astro
+ * loads astro.config.* through a Vite module runner and tears that runner down
+ * once the config resolves -- a dynamic import inside astro:config:setup races
+ * the teardown and loses with "Vite module runner has been closed". It won that
+ * race in the project this was written in and lost it in the very next project
+ * tried, which is the worst possible way for a bug to behave. At module scope
+ * the runner is still up by construction.
+ *
+ * There is no logger at module scope, so the failure is stashed and reported
+ * from the hook.
+ */
+let parse = null;
+let parserError = null;
+try {
+	({ parse } = await import('@astrojs/compiler-rs'));
+} catch (err) {
+	parserError = err;
+}
 
 /** Shared with the client half via a prelude -- see injectScript below. */
 const MARKS = { open: 'src:', close: '/src', stamp: 'data-pf' };
@@ -117,7 +143,53 @@ function templateStart(source) {
 	return fence ? fence.index + fence[0].length : null;
 }
 
-/** `{start, end}` of each stampable opening tag's NAME, from the template only. */
+/**
+ * Maps UTF-8 byte offsets to JS string indices, for files where they differ.
+ *
+ * Iterates by CODE POINT, not code unit: an astral character is 4 UTF-8 bytes
+ * and 2 UTF-16 units, and stepping per unit would feed lone surrogates to
+ * byteLength and get 3 + 3.
+ */
+function buildByteToChar(source) {
+	const map = new Map();
+	let byte = 0;
+	let index = 0;
+	for (const ch of source) {
+		map.set(byte, index);
+		byte += Buffer.byteLength(ch, 'utf8');
+		index += ch.length;
+	}
+	map.set(byte, index);
+	return map;
+}
+
+/**
+ * Char index just past `<tagname`, or null if the offsets can't be trusted.
+ *
+ * THE COMPILER'S OFFSET CONVENTION IS NOT STABLE ACROSS VERSIONS. compiler-rs
+ * 0.3.x reports UTF-8 BYTE offsets; 0.4.x reports JS string indices. The two
+ * agree on a pure-ASCII file and diverge silently from the first non-ASCII
+ * character onward -- one `>=` sign 50 lines up was enough to shift every
+ * stamp in a real file by two, landing them mid-attribute and producing markup
+ * that would not compile.
+ *
+ * So nothing here trusts an offset it has not checked against the source. Both
+ * interpretations are tried and the one that actually lands on `<tagname` wins.
+ * If neither does, this returns null and the tag simply goes unstamped: the
+ * comment layer still works, and a future compiler that invents a third
+ * convention degrades to comments-only instead of corrupting files.
+ */
+function tagNameEnd(source, byteToChar, el, name) {
+	const literal = `<${name}`;
+	// (a) offsets are JS string indices
+	if (source.startsWith(literal, el.start)) return el.start + literal.length;
+	// (b) offsets are UTF-8 byte offsets
+	const index = byteToChar?.get(el.start);
+	if (index !== undefined && source.startsWith(literal, index)) return index + literal.length;
+	return null;
+}
+
+/** Char index just past each stampable opening tag's name, template only. */
 async function openingTags(source, parse) {
 	let result;
 	try {
@@ -128,6 +200,11 @@ async function openingTags(source, parse) {
 	// A file the parser only partly understood is a file we don't inject
 	// into -- a stamp placed off a bad offset would corrupt real markup.
 	if (result.diagnostics?.length) return [];
+
+	// Only built when the file actually has non-ASCII in it; on an ASCII file
+	// the two conventions are the same thing and (a) always wins.
+	const byteToChar =
+		Buffer.byteLength(source, 'utf8') === source.length ? null : buildByteToChar(source);
 
 	const hits = [];
 	const stack = [result.ast?.body];
@@ -144,7 +221,8 @@ async function openingTags(source, parse) {
 			// components, which carry their own stamps from their own file;
 			// member expressions (<Astro.self />) are neither.
 			if (nm?.type === 'JSXIdentifier' && /^[a-z]/.test(nm.name) && !SKIP_TAGS.has(nm.name)) {
-				hits.push({ start: nm.start, end: nm.end });
+				const at = tagNameEnd(source, byteToChar, n, nm.name);
+				if (at !== null) hits.push(at);
 			}
 		}
 		for (const k of Object.keys(n)) if (k !== 'type') stack.push(n[k]);
@@ -178,9 +256,9 @@ async function markSource(source, relPath, parse) {
 	}
 
 	if (parse) {
-		for (const tag of await openingTags(source, parse)) {
-			const line = source.slice(0, tag.start).split('\n').length;
-			inserts.push({ at: tag.end, text: ` ${MARKS.stamp}="${relPath}:${line}"` });
+		for (const at of await openingTags(source, parse)) {
+			const line = source.slice(0, at).split('\n').length;
+			inserts.push({ at, text: ` ${MARKS.stamp}="${relPath}:${line}"` });
 		}
 	}
 
@@ -191,6 +269,23 @@ async function markSource(source, relPath, parse) {
 	let out = source;
 	for (const { at, text } of inserts) out = out.slice(0, at) + text + out.slice(at);
 	return out;
+}
+
+/**
+ * The project's Astro major version, or null if it can't be determined.
+ * Walks up from the project root because a monorepo hoists node_modules.
+ */
+function astroMajor(root) {
+	for (let dir = root, prev = null; dir !== prev; prev = dir, dir = dirname(dir)) {
+		try {
+			const pkg = JSON.parse(readFileSync(join(dir, 'node_modules/astro/package.json'), 'utf-8'));
+			const major = Number.parseInt(String(pkg.version).split('.')[0], 10);
+			return Number.isNaN(major) ? null : major;
+		} catch {
+			// keep walking
+		}
+	}
+	return null;
 }
 
 function markerPlugin(root, parse) {
@@ -221,22 +316,41 @@ export default function pathfinder() {
 			'astro:config:setup': async ({ command, config, updateConfig, injectScript, logger }) => {
 				if (command !== 'dev') return;
 
-				// Ships with Astro; resolved rather than depended on. Without it
-				// the comment layer still works and only slot precision is lost,
-				// so this degrades instead of failing.
-				let parse = null;
-				try {
-					({ parse } = await import('@astrojs/compiler-rs'));
-				} catch {
+				const root = fileURLToPath(config.root);
+
+				// Astro 6 and earlier compile through the Go compiler, where
+				// `annotateSourceFile` is really implemented -- those versions
+				// already stamp data-astro-source-file on every element in dev
+				// and the dev toolbar reads it, so pathfinder has nothing to add.
+				//
+				// It would also actively break them: their frontmatter parser
+				// eats the character right after the closing `---`, which is
+				// exactly where the opening comment goes, turning `<!--src:...`
+				// into visible `!--src:...` text on the page. Measured on Astro
+				// 6.4.2: 19 of 20 markers mangled. Refuse rather than corrupt.
+				const major = astroMajor(root);
+				if (major !== null && major < 7) {
 					logger.warn(
-						'@astrojs/compiler-rs not resolvable — per-element stamps are off, ' +
-							'so slotted markup will name its component rather than its caller',
+						`Astro ${major} compiles through @astrojs/compiler, which implements ` +
+							'annotateSourceFile natively — use the built-in dev toolbar instead. ' +
+							'pathfinder is disabled (it targets Astro 7+, where that flag is a no-op).',
+					);
+					return;
+				}
+
+				if (!parse) {
+					// The reason goes in the message on purpose. A bare "not
+					// resolvable" sent a real debugging session down the wrong
+					// path once already -- the cause is the only useful part.
+					const why = parserError?.message ?? parserError ?? 'unknown';
+					logger.warn(
+						`@astrojs/compiler-rs not resolvable (${why}) — per-element stamps ` +
+							'are off, so slotted markup will name its component rather than ' +
+							'its caller',
 					);
 				}
 
-				updateConfig({
-					vite: { plugins: [markerPlugin(fileURLToPath(config.root), parse)] },
-				});
+				updateConfig({ vite: { plugins: [markerPlugin(root, parse)] } });
 
 				// Inlined rather than imported by path: injectScript takes
 				// source, so there is no specifier for Vite to resolve and
